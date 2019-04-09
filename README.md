@@ -242,15 +242,115 @@ int connect (int socket, struct sockaddr* servaddr, socklen_t addrlen);
 
 几个参数的意义和前面的accept函数意义一样。要注意的是服务器端收到连接请求的时候并不是马上调用accept()函数，而是把它放入到请求信息的等待队列中。
 
+## 套接字的多种可选项
 
+可以通过如下函数对套接字可选项的参数进行获取以及设置。
+
+```C++
+/* Put the current value for socket FD's option OPTNAME at protocol level LEVEL
+   into OPTVAL (which is *OPTLEN bytes long), and set *OPTLEN to the value's
+   actual length.  Returns 0 on success, -1 for errors.  */
+extern int getsockopt (int sock, int __level, int __optname,
+		       void *__optval, socklen_t *optlen) __THROW;
+
+/* Set socket FD's option OPTNAME at protocol level LEVEL
+   to *OPTVAL (which is OPTLEN bytes long).
+   Returns 0 on success, -1 for errors.  */
+extern int setsockopt (int sock, int __level, int __optname,
+		       const void *__optval, socklen_t __optlen) __THROW;
+```
+
+参数说明：
+
+**scok**： 套接字的文件描述符
+
+**__level **：可选项的协议层，如下：
+
+| **协议层**  |          **功能**          |
+| :---------: | :------------------------: |
+| SOL_SOCKET  | 套接字相关通用可选项的设置 |
+| IPPROTO_IP  | 在IP层设置套接字的相关属性 |
+| IPPROTO_TCP | 在TCP层设置套接字相关属性  |
+
+**__optname** ：要查看的可选项名，几个主要的选项如下
+
+|    **选项名**     |                           **说明**                           | **数据类型** | 所属协议层  |
+| :---------------: | :----------------------------------------------------------: | :----------: | ----------- |
+|     SO_RCVBUF     |                        接收缓冲区大小                        |     int      | SOL_SOCKET  |
+|     SO_SNDBUF     |                        发送缓冲区大小                        |     int      | SOL_SOCKET  |
+|    SO_RCVLOWAT    |                        接收缓冲区下限                        |     int      | SOL_SOCKET  |
+|    SO_SNDLOWAT    |                        发送缓冲区下限                        |     int      | SOL_SOCKET  |
+|      SO_TYPE      |            获得套接字类型(这个只能获取，不能设置)            |     int      | SOL_SOCKET  |
+|   SO_REUSEADDR    | 是否启用地址再分配，主要原理是操作关闭套接字的Time-wait时间等待的开启和关闭 |     int      | SOL_SOCKET  |
+|    IP_HDRINCL     |                     在数据包中包含IP首部                     |     int      | IPPROTO_IP  |
+| IP_MULTICAST_TTL  |             生存时间(Time To Live)，组播传送距离             |     int      | IPPROTO_IP  |
+| IP_ADD_MEMBERSHIP |                           加入组播                           |     int      | IPPROTO_IP  |
+|    IP_OPTINOS     |                          IP首部选项                          |     int      | IPPROTO_IP  |
+|    TCP_NODELAY    |                       不使用Nagle算法                        |     int      | IPPROTO_TCP |
+|   TCP_KEEPALIVE   |        TCP保活机制开启下，设置保活包空闲发送时间间隔         |     int      | IPPROTO_TCP |
+|   TCP_KEEPINTVL   |    TCP保活机制开启下，设置保活包无响应情况下重发时间间隔     |     int      | IPPROTO_TCP |
+|    TCP_KEEPCNT    |    TCP保活机制开启下，设置保活包无响应情况下重复发送次数     |     int      | IPPROTO_TCP |
+|    TCP_MAXSEG     |                     TCP最大数据段的大小                      |     int      | IPPROTO_TCP |
+
+**__optval**  ：保存查看(get)/更改(set)的结果
+
+**optlen** ： 传递第四个参数的字节大小
+
+
+
+这里只对几个可选项参数进行说明：
+
+#### 1.设置可选项的IO缓冲区大小
+
+参考案例如下：
+
+```C++
+int status, snd_buf;
+socklen_t len = sizeof(snd_buf);
+status = getsockopt(serv_socket, SOL_SOCKET, SO_SNDBUF, (void*)&snd_buf, &len);
+cout << "发送缓冲区大小: " << snd_buf <<endl;
+```
+
+虽然可以获得的接收/发送缓冲区的大小，但是通过设置接收/发送缓冲区大小时，得到的结果会与我们期望的不一样，因为对缓冲区大小的设置是一件很谨慎的事，其自身会根据设置的值进行一定的优化。
+
+#### 2. 是否启用地址再分配与Time-wait时间等待
+
+关于地址再分配问题会发生在这种情况下，首先看两种情况，假设客户端和服务器正在通讯（测试代码[下载地址](https://github.com/GQXING/Socket-Program/tree/master/first_example)）。
+
+① 在客户端的终端按`Crtl + c`或者其他方式断开与服务器的连接，此时客户端发送FIN消息，经过四次握手断开连接，操作系统关闭套接字，相当于`close()`的过程。然后在次启动客户端，顺利启动。
+
+② 在服务端的终端按`Crtl + c`或者其他方式断开与客户端的连接，像①中一样，再次启动服务端，此时出现`bind() error`错误。
+
+服务器端出现这种情况的原因是调用套接字分配网络地址函数`bind()`的时候之前使用建立连接的同一端口号还没有来得及停用（大约要过两三分钟才处于可用状态），而客户端申请连接的端口是任意指定，程序运行时会动态分配端口号。
+
+服务器端端口没有被释放到被释放的时间状态称为Time-wait状态，这个状态的出现可以借助TCP断开连接的四次握手协议来分析，如下图：
+
+![四次握手协议](./closed.jpg)
+
+当client端发送`ACK=1 ack=k+1`这个消息给服务端就立即消除套接字，若此时该消息中途传输被遗失，则这个时候server端就永远无法收到client的`ACK`消息了。
+
+#### 3. TCP_NODELAY
+
+TCP套接字默认是使用Nagle算法的，该算法的特征是**只有收到前一条数据的ACK消息后，才会发送下一条数据。**
+
+从网上找到一张图说明使用和禁用Nagle算法的区别（[图片来源](http://www.it610.com/article/5254468.htm)），如下：
+
+![Nagle](./timg.jpeg)
+
+设置代码如下：
+
+```C++
+#include <netinet/tcp.h> //注意要引入这个头文件
+
+int opt_val = 1;
+setsockopt(serv_socket, IPPROTO_TCP, TCP_NODELAY, (void*)&opt_val, sizeof(opt_val));
+```
 
 ## 程序案例
 
 案例的过程，在网上看到了关于read和write的发送与接受过程的图，便于理解：
 
 ![](http://images.cnblogs.com/cnblogs_com/helloworldcode/1414395/o_TCP-socket.jpg)
-
-#### 
 
 注意以上代码都是在ubuntu下运行的，在windows的代码与此有所不同。比如要引入一个`<winsock2.h>`的头文件，调用`WSAStartup(...)`函数进行Winsock的初始化，而且它们的接受与发送函数也有所不同。
 
